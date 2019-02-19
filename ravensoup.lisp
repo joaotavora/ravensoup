@@ -9,7 +9,15 @@
    #:benchmark-all))
 (in-package :ravensoup)
 
-(deftype utf-string () #+sbcl '(simple-array character) #-sbcl 'string)
+(deftype utf-string ()
+  #+(or cmucl sbcl) '(simple-array character)
+  #-(or sbcl cmucl) 'string)
+
+(deftype ascii-string ()
+  ;; Relevant:
+  ;;     https://groups.google.com/forum/#!msg/comp.lang.lisp/Awu4pj12EDY/C-_5wNOk45wJ
+  #+(or sbcl) '(simple-array character)
+  #-(or sbcl) 'simple-base-string)
 
 (defun spellable-p-hash (message bowl)
   "Non-nil if MESSAGE can be spelled using letters in BOWL."
@@ -30,12 +38,12 @@
 
 (defun spellable-p-ascii (message bowl)
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
-MESSAGE must be a CL:SIMPLE-BASE-STRING (usually means ASCII or
-something equivalent), or this fails horribly.  MESSAGE's length must
-fit in a fixnum."
+MESSAGE must be coercible to CL:SIMPLE-BASE-STRING (usually means
+ASCII or something equivalent), or this fails horribly.  MESSAGE's
+length must fit in a fixnum."
   (declare (optimize (speed 3))
-           (type (simple-base-string) message)
-           (type (simple-base-string) bowl))
+           (type ascii-string message)
+           (type ascii-string bowl))
   (let ((needed (make-array 256 :element-type 'fixnum))
         (len (length message)))
     (declare (type fixnum len)
@@ -43,7 +51,7 @@ fit in a fixnum."
              (dynamic-extent needed))
     (loop for letter across message
           do (incf (aref needed (char-code letter))))
-    (loop for letter across (the (simple-string) bowl)
+    (loop for letter across bowl
           unless (minusp (decf (aref needed (char-code letter))))
             do (decf len)
           when (zerop len)
