@@ -203,12 +203,18 @@ characters from the start of DATASET."
                         for msg in phrases
                         do (funcall fn msg bowl)))))
       #+cl-ppcre
-      (princ (ppcre:scan-to-strings
-              (ppcre:create-scanner "([0-9\.]+) user"
-                                    :multi-line-mode t)
-              (with-output-to-string (*trace-output*)
-                (time (do-it))))
-             *trace-output*)
+      (multiple-value-bind (match submatches)
+          (ppcre:scan-to-strings
+           (ppcre:create-scanner
+            #+sbcl "([-0-9\.]+) user"
+            #+ccl "([-0-9\.]+) seconds.*user mode"
+            #+cmucl "([-0-9\.e]+) seconds of user run time"
+            :multi-line-mode t)
+           (with-output-to-string (*trace-output*)
+             (time (do-it))))
+        (when match
+          (princ (elt submatches 0) *trace-output*)
+          (princ "s")))
       #-cl-ppcre
       (time (do-it)))
     t))
