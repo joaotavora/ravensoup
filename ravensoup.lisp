@@ -184,11 +184,21 @@ characters from the start of DATASET."
   "Test FN on DATASET."
   (multiple-value-bind (phrases bowl)
       (phrases-and-bowl dataset)
-    (time (loop repeat repetitions
-             do (loop
-                  repeat 5000
-                  for msg in phrases
-                  do (funcall fn msg bowl))))
+    (flet ((do-it ()
+             (loop repeat repetitions
+                   do (loop
+                        repeat 5000
+                        for msg in phrases
+                        do (funcall fn msg bowl)))))
+      #+cl-ppcre
+      (princ (ppcre:scan-to-strings
+              (ppcre:create-scanner "([0-9\.]+) user"
+                                    :multi-line-mode t)
+              (with-output-to-string (*trace-output*)
+                (time (do-it))))
+             *trace-output*)
+      #-cl-ppcre
+      (time (do-it)))
     t))
 
 (defun benchmark-all (&key
@@ -203,13 +213,13 @@ characters from the start of DATASET."
                            "big-chinese-utf-8.txt"
                            )))
   (loop
-    for function in functions
-    do (loop for dataset in datasets
-             do (format t "~&Trying ~a for dataset ~a~%" function dataset)
+    for dataset in datasets
+    do (format *trace-output* "~&~a~%" dataset)
+       (loop for function in functions
+             do (format t "~&   ~a:  " function)
                 (force-output )
                 (if (eq function 'spellable-p-mixed-trained)
                     (let ((trained (trained-function dataset)))
-                      (format t "~&Trained for dataset ~a~%" dataset)
                       (force-output )
                       (ignore-errors
                        (benchmark (lambda (msg bowl)
