@@ -24,7 +24,8 @@
     (loop for letter across bowl
           unless (minusp (decf (the fixnum (gethash letter needed 0))))
             do (decf len)
-          when (zerop len) do (return-from spellable-p-hash t)
+          when (zerop len)
+            do (return-from spellable-p-hash t)
           finally (return nil))))
 
 (defun spellable-p-ascii (message bowl)
@@ -45,8 +46,9 @@ fit in a fixnum."
     (loop for letter across (the (simple-string) bowl)
           unless (minusp (decf (aref needed (char-code letter))))
             do (decf len)
-          when (zerop len) do (return-from spellable-p-ascii t)
-            finally (return nil))))
+          when (zerop len)
+            do (return-from spellable-p-ascii t)
+          finally (return nil))))
 
 (defconstant +fast-set-len+ 1024
   "Size of the stack-allocated array for SPELLABLE-P-MIXED and
@@ -79,7 +81,8 @@ MESSAGE's length must fit in a fixnum."
                   (decf (the fixnum (gethash letter more-needed 0))))
           unless (minusp decremented)
             do (decf len)
-          when (zerop len) do (return-from spellable-p-mixed t)
+          when (zerop len)
+            do (return-from spellable-p-mixed t)
           finally (return nil))))
 
 (defun spellable-p-mixed-trained (message bowl
@@ -110,7 +113,8 @@ MESSAGE's length must fit in a fixnum."
                   (decf (the fixnum (gethash letter more-needed 0))))
           unless (minusp decremented)
             do (decf len)
-          when (zerop len) do (return-from spellable-p-mixed-trained t)
+          when (zerop len)
+            do (return-from spellable-p-mixed-trained t)
           finally (return nil))))
 
 
