@@ -164,46 +164,48 @@ often in DATASET.  If non-nil HOWMANY, use just the that many
 characters from the start of DATASET."
   (or
    (gethash (cons dataset howmany) *training-cache*)
-   (setf (gethash (cons dataset howmany) *training-cache*)
-         (let* ((slurped
-                  (with-open-file (f dataset :external-format :utf-8)
-                    (let ((seq (make-array (or howmany
-                                               (file-length f))
-                                           :element-type 'character
-                                           :fill-pointer t)))
-                      (setf (fill-pointer seq)
-                            (read-sequence seq f))
-                      seq)))
-                (histogram (let ((ht (make-hash-table)))
-                             (loop for char across slurped
-                                   do (incf (gethash (char-code char) ht 0)))
-                             ht))
-                (histogram-alist
-                  (let ((alist nil))
-                    (maphash (lambda (k v)
-                               (push (cons k v) alist))
-                             histogram)
-                    alist))
-                (most-frequent (subseq (sort histogram-alist #'> :key #'cdr)
-                                       0 (min +fast-set-len+
-                                              (hash-table-count histogram))))
-                (table (make-array char-code-limit
-                                   :element-type 'fixnum
-                                   :initial-element -1)))
-           (loop for (code . nil) in most-frequent
-                 for i from 0
-                 do (setf (aref table code) i))
-           ;; Now return the lambda
-           (values
-            (lambda (char)
-              (let ((opt (aref table (char-code char))))
-                (if (minusp opt)
-                    (+ +fast-set-len+ (char-code char)) ; avoid collision
-                    opt)))
-            histogram
-            histogram-alist
-            most-frequent
-            table)))))
+   (progn
+     (format *trace-output* "~&Training for ~a~%" dataset)
+     (setf (gethash (cons dataset howmany) *training-cache*)
+           (let* ((slurped
+                    (with-open-file (f dataset :external-format :utf-8)
+                      (let ((seq (make-array (or howmany
+                                                 (file-length f))
+                                             :element-type 'character
+                                             :fill-pointer t)))
+                        (setf (fill-pointer seq)
+                              (read-sequence seq f))
+                        seq)))
+                  (histogram (let ((ht (make-hash-table)))
+                               (loop for char across slurped
+                                     do (incf (gethash (char-code char) ht 0)))
+                               ht))
+                  (histogram-alist
+                    (let ((alist nil))
+                      (maphash (lambda (k v)
+                                 (push (cons k v) alist))
+                               histogram)
+                      alist))
+                  (most-frequent (subseq (sort histogram-alist #'> :key #'cdr)
+                                         0 (min +fast-set-len+
+                                                (hash-table-count histogram))))
+                  (table (make-array char-code-limit
+                                     :element-type 'fixnum
+                                     :initial-element -1)))
+             (loop for (code . nil) in most-frequent
+                   for i from 0
+                   do (setf (aref table code) i))
+             ;; Now return the lambda
+             (values
+              (lambda (char)
+                (let ((opt (aref table (char-code char))))
+                  (if (minusp opt)
+                      (+ +fast-set-len+ (char-code char)) ; avoid collision
+                      opt)))
+              histogram
+              histogram-alist
+              most-frequent
+              table))))))
 
 (defun benchmark (fn *dataset* &optional (repetitions 1))
   "Test FN on DATASET."
