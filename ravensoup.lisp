@@ -142,7 +142,7 @@ MESSAGE's length must fit in a fixnum."
 (defvar *debug-lock* (bt:make-lock))
 
 (defmacro %debug (&rest args)
-  `(when nil
+  `(when nil ; t
      (bt:with-lock-held (*debug-lock*)
        (format *trace-output* ,@args)
        (force-output *trace-output*))))
@@ -150,7 +150,7 @@ MESSAGE's length must fit in a fixnum."
 #+bordeaux-threads
 (defun spellable-p-parallel (message bowl
                              &key (strategy #'spellable-p-mixed)
-                                  (parts 3))
+                                  (parts 4))
   (loop with all-done = nil
         with wait-for-it = (cons (bt:make-condition-variable :name "wait for it")
                                  (bt:make-lock))
@@ -181,21 +181,20 @@ MESSAGE's length must fit in a fixnum."
                            for (done needed)
                              = (multiple-value-list
                                 (funcall strategy msg bowl :report-remainder-p t))
-                           when done
-                           do
-                              (%debug "~&; ~a for ~a and ~a was successful!~%"
-                                      (bt:current-thread) msg bowl)
-                              (setq all-done t)
-                              (bt:with-lock-held ((cdr wait-for-it))
-                                (mapc #'bt:destroy-thread
-                                      (remove-if-not #'bt:thread-alive-p
-                                                     (remove (bt:current-thread) all-threads))))
-                              (return)
-                           unless needed
-                             do (error "Expected a remainer trying ~a on ~a" msg bowl)
-                           else
-                             do (%debug "~&; ~a for ~a and ~a failed and rest ~a!~%"
-                                        (bt:current-thread) msg bowl needed)))
+                           do (cond (done
+                                     (%debug "~&; ~a for ~a and ~a was successful!~%"
+                                             (bt:current-thread) msg bowl)
+                                     (setq all-done t)
+                                     (return))
+                                    (all-done
+                                     (%debug "~&; ~a was unsucessful but someone else solved it!"
+                                             (bt:current-thread) msg bowl)
+                                     (return))
+                                    ((not needed)
+                                     (error "Given that we failed, I expected a remainder"))
+                                    (t
+                                     (%debug "~&; ~a for ~a and ~a failed and rest ~a!~%"
+                                             (bt:current-thread) msg bowl needed)))))
                    :name name))
           into all-threads
         finally
@@ -376,6 +375,18 @@ characters from the start of DATASET."
     (loop for i from 0 below (length str)
           do (setf (aref str i) (code-char (random 256))))
     str))
+
+(defun tricky-message-and-bowl (n)
+  (let* ((prefix "fooba")
+         (s (make-array (length prefix)
+                        :adjustable t
+                        :initial-contents prefix
+                        :element-type 'character
+                        :fill-pointer t)))
+    (loop repeat n do (vector-push-extend #\x s))
+    (vector-push-extend #\r s)
+    (values "foobar" s)))
+
 
 (defun basic-test ()
   (flet ((test (fn msg bowl expected)
