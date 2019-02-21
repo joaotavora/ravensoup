@@ -16,7 +16,7 @@
 (deftype ascii-string ()
   ;; Relevant:
   ;;     https://groups.google.com/forum/#!msg/comp.lang.lisp/Awu4pj12EDY/C-_5wNOk45wJ
-  #+(or sbcl) '(simple-array character)
+  #+(or sbcl) 'string
   #-(or sbcl) 'simple-base-string)
 
 (defun spellable-p-hash (message bowl)
@@ -36,7 +36,7 @@
             do (return-from spellable-p-hash t)
           finally (return nil))))
 
-(defun spellable-p-ascii (message bowl)
+(defun spellable-p-ascii (message bowl &key report-remainder-p)
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
 MESSAGE must be coercible to CL:SIMPLE-BASE-STRING (usually means
 ASCII or something equivalent), or this fails horribly.  MESSAGE's
@@ -56,7 +56,20 @@ length must fit in a fixnum."
             do (decf len)
           when (zerop len)
             do (return-from spellable-p-ascii t)
-          finally (return nil))))
+          finally (return
+                    (values nil
+                            (when report-remainder-p
+                              (let ((s (make-array (length message)
+                                                   :fill-pointer 0
+                                                   :element-type 'character))
+                                    (code 0))
+                                (declare (type fixnum code))
+                                (loop for n across needed
+                                      do (loop repeat (max n 0)
+                                               do (vector-push-extend
+                                                   (code-char code) s))
+                                         (incf code))
+                                s)))))))
 
 (defconstant +fast-set-len+ 1024
   "Size of the stack-allocated array for SPELLABLE-P-MIXED and
@@ -130,64 +143,70 @@ MESSAGE's length must fit in a fixnum."
             do (return-from spellable-p-mixed-trained t)
           finally (return nil))))
 
+(let ((lock (bt:make-lock)))
+  (defun %debug (&rest args)
+    (bt:with-lock-held (lock)
+      (apply #'format *trace-output* args)
+      (force-output *trace-output*))))
+
 #+bordeaux-threads
 (defun spellable-p-parallel (message bowl
-                             &key (strategy #'spellable-p-mixed)
+                             &key (strategy #'spellable-p-ascii)
                                   (parts 2))
   (loop with all-done = nil
         with wait-for-it = (cons (bt:make-condition-variable :name "wait for it")
                                  (bt:make-lock))
         with ready = nil
-        for sub-bowl in (loop with bowl-len = (length bowl)
-                              with part-len = (ceiling bowl-len parts)
-                              for i from 0 below parts
-                              collect (make-array (min (-
-                                                        bowl-len
-                                                        (* i part-len))
-                                                       part-len)
-                                                  :element-type 'character
-                                                  :displaced-to bowl
-                                                  :displaced-index-offset
-                                                  (* i part-len)))
+        with all-bowls = (loop with bowl-len = (length bowl)
+                               with part-len = (ceiling bowl-len parts)
+                               for i from 0 below parts
+                               collect (make-array (min (-
+                                                         bowl-len
+                                                         (* i part-len))
+                                                        part-len)
+                                                   :element-type 'character
+                                                   :displaced-to bowl
+                                                   :displaced-index-offset
+                                                   (* i part-len)))
+        for sub-bowl in all-bowls
         for i from 0 for name = (format nil "thread-~d" i)
-        collect (let ((sub-bowl sub-bowl))
+        collect (let ((bowls (cons sub-bowl
+                                   (remove sub-bowl all-bowls))))
                   (bt:make-thread
                    (lambda ()
-                     (format *trace-output* "~&; ~a is waiting~%" (bt:current-thread))
                      (bt:with-lock-held ((cdr wait-for-it))
                        (push (bt:current-thread) ready)
-                       (format *trace-output* "~&; Gonna wait for ~a~%" (car wait-for-it))
-                       (force-output *trace-output*)
-                       (bt:condition-wait (car wait-for-it) (cdr wait-for-it) :timeout 2))
-                     (format *trace-output* "~&; Starting ~a for ~S and ~a~%" (bt:current-thread) sub-bowl (cdr wait-for-it))
-                     (multiple-value-bind (done needed)
-                         (funcall strategy message sub-bowl)
-                       (declare (ignore needed)) ; FIXME
-                       (format *trace-output* "~&; ~a was ~a!~%"
-                               (bt:current-thread)
-                               (if done "successful!" "not successful"))
-                       (when done (setq all-done t)
-                         ;; (mapc #'bt:destroy-thread
-                         ;;       (delete (bt:current-thread) all-threads))
-                         )))
+                       (bt:condition-wait (car wait-for-it) (cdr wait-for-it)))
+                     (%debug"~&; Starting ~a for ~S and ~a~%" (bt:current-thread) sub-bowl (cdr wait-for-it))
+                     (loop for bowl in bowls
+                           for msg = message then needed
+                           for (done needed)
+                             = (multiple-value-list
+                                (funcall strategy msg bowl :report-remainder-p t))
+                           if done
+                           do
+                              (%debug "~&; ~a for ~a and ~a was successful!~%"
+                                      (bt:current-thread) msg bowl)
+                              (setq all-done t)
+                              (mapc #'bt:destroy-thread
+                                    (delete (bt:current-thread) all-threads))
+                           else
+                             do
+                                (%debug "~&; ~a for ~a and ~a failed and rest ~a!~%"
+                                        (bt:current-thread) msg bowl needed)))
                    :name name))
-        into all-threads
+          into all-threads
         finally
-           (format *trace-output* "~&; Waiting for all threads to become ready~%")
            (loop while (set-difference all-threads ready)) ;; busy-loop
            (bt:with-lock-held ((cdr wait-for-it))
-             (format *trace-output* "~&; Notifying ~a~%" (car wait-for-it))
-             (force-output *trace-output*)
              (loop for thread in ready
-                   do (bt:condition-notify (car wait-for-it)))
-
-             
-             (bt:condition-notify (car wait-for-it)))
-           (format *trace-output* "~&; Waiting for all threads to die~%")
-           (mapc #'bt:join-thread all-threads)
+                   do (bt:condition-notify (car wait-for-it))))
+           (%debug "~&; Waiting for all threads to die~%")
+           (mapc (lambda (thread)
+                   (ignore-errors
+                    (bt:join-thread thread)))
+                 all-threads)
            (return all-done)))
-
-
 
 
 ;;; Helpers
