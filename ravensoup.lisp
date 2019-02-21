@@ -10,7 +10,7 @@
 (in-package :ravensoup)
 
 (deftype utf-string ()
-  #+(or cmucl sbcl) '(simple-array character)
+  #+(or cmucl sbcl) 'string
   #-(or sbcl cmucl) 'string)
 
 (deftype ascii-string ()
@@ -129,6 +129,65 @@ MESSAGE's length must fit in a fixnum."
           when (zerop len)
             do (return-from spellable-p-mixed-trained t)
           finally (return nil))))
+
+#+bordeaux-threads
+(defun spellable-p-parallel (message bowl
+                             &key (strategy #'spellable-p-mixed)
+                                  (parts 2))
+  (loop with all-done = nil
+        with wait-for-it = (cons (bt:make-condition-variable :name "wait for it")
+                                 (bt:make-lock))
+        with ready = nil
+        for sub-bowl in (loop with bowl-len = (length bowl)
+                              with part-len = (ceiling bowl-len parts)
+                              for i from 0 below parts
+                              collect (make-array (min (-
+                                                        bowl-len
+                                                        (* i part-len))
+                                                       part-len)
+                                                  :element-type 'character
+                                                  :displaced-to bowl
+                                                  :displaced-index-offset
+                                                  (* i part-len)))
+        for i from 0 for name = (format nil "thread-~d" i)
+        collect (let ((sub-bowl sub-bowl))
+                  (bt:make-thread
+                   (lambda ()
+                     (format *trace-output* "~&; ~a is waiting~%" (bt:current-thread))
+                     (bt:with-lock-held ((cdr wait-for-it))
+                       (push (bt:current-thread) ready)
+                       (format *trace-output* "~&; Gonna wait for ~a~%" (car wait-for-it))
+                       (force-output *trace-output*)
+                       (bt:condition-wait (car wait-for-it) (cdr wait-for-it) :timeout 2))
+                     (format *trace-output* "~&; Starting ~a for ~S and ~a~%" (bt:current-thread) sub-bowl (cdr wait-for-it))
+                     (multiple-value-bind (done needed)
+                         (funcall strategy message sub-bowl)
+                       (declare (ignore needed)) ; FIXME
+                       (format *trace-output* "~&; ~a was ~a!~%"
+                               (bt:current-thread)
+                               (if done "successful!" "not successful"))
+                       (when done (setq all-done t)
+                         ;; (mapc #'bt:destroy-thread
+                         ;;       (delete (bt:current-thread) all-threads))
+                         )))
+                   :name name))
+        into all-threads
+        finally
+           (format *trace-output* "~&; Waiting for all threads to become ready~%")
+           (loop while (set-difference all-threads ready)) ;; busy-loop
+           (bt:with-lock-held ((cdr wait-for-it))
+             (format *trace-output* "~&; Notifying ~a~%" (car wait-for-it))
+             (force-output *trace-output*)
+             (loop for thread in ready
+                   do (bt:condition-notify (car wait-for-it)))
+
+             
+             (bt:condition-notify (car wait-for-it)))
+           (format *trace-output* "~&; Waiting for all threads to die~%")
+           (mapc #'bt:join-thread all-threads)
+           (return all-done)))
+
+
 
 
 ;;; Helpers
