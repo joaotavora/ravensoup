@@ -143,7 +143,7 @@ MESSAGE's length must fit in a fixnum."
   (let* (phrases
          (bowl
            (with-output-to-string (s)
-             (with-open-file (f dataset)
+             (with-open-file (f dataset :external-format :utf-8)
                (loop with size = (file-length f)
                      for line = (read-line f nil nil)
                      while line
@@ -166,7 +166,7 @@ characters from the start of DATASET."
    (gethash (cons dataset howmany) *training-cache*)
    (setf (gethash (cons dataset howmany) *training-cache*)
          (let* ((slurped
-                  (with-open-file (f dataset)
+                  (with-open-file (f dataset :external-format :utf-8)
                     (let ((seq (make-array (or howmany
                                                (file-length f))
                                            :element-type 'character
