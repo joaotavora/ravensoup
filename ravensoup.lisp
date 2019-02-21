@@ -19,7 +19,7 @@
   #+(or sbcl) 'string
   #-(or sbcl) 'simple-base-string)
 
-(defun spellable-p-hash (message bowl)
+(defun spellable-p-hash (message bowl &key report-remainder-p)
   "Non-nil if MESSAGE can be spelled using letters in BOWL."
   (declare (optimize (speed 3))
            (type utf-string message)
@@ -34,7 +34,10 @@
             do (decf len)
           when (zerop len)
             do (return-from spellable-p-hash t)
-          finally (return nil))))
+          finally (return
+                    (values nil
+                            (when report-remainder-p
+                              (report-remainder message nil needed)))))))
 
 (defun spellable-p-ascii (message bowl &key report-remainder-p)
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
@@ -59,24 +62,14 @@ length must fit in a fixnum."
           finally (return
                     (values nil
                             (when report-remainder-p
-                              (let ((s (make-array (length message)
-                                                   :fill-pointer 0
-                                                   :element-type 'character))
-                                    (code 0))
-                                (declare (type fixnum code))
-                                (loop for n across needed
-                                      do (loop repeat (max n 0)
-                                               do (vector-push-extend
-                                                   (code-char code) s))
-                                         (incf code))
-                                s)))))))
+                              (report-remainder message needed nil)))))))
 
 (defconstant +fast-set-len+ 1024
   "Size of the stack-allocated array for SPELLABLE-P-MIXED and
 SPELLABLE-P-MIXED-TRAINED.  Can't be too high or SBCL won't be able to
 do that optimization.")
 
-(defun spellable-p-mixed (message bowl)
+(defun spellable-p-mixed (message bowl &key report-remainder-p)
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
 MESSAGE's length must fit in a fixnum."
   (declare (optimize (speed 3))
@@ -104,7 +97,10 @@ MESSAGE's length must fit in a fixnum."
             do (decf len)
           when (zerop len)
             do (return-from spellable-p-mixed t)
-          finally (return nil))))
+          finally (return
+                    (values nil
+                            (when report-remainder-p
+                              (report-remainder message fast-needed more-needed)))))))
 
 (defvar *dataset* nil
   "If non-nil bound to the current dataset being tested by ")
@@ -143,16 +139,18 @@ MESSAGE's length must fit in a fixnum."
             do (return-from spellable-p-mixed-trained t)
           finally (return nil))))
 
-(let ((lock (bt:make-lock)))
-  (defun %debug (&rest args)
-    (bt:with-lock-held (lock)
-      (apply #'format *trace-output* args)
-      (force-output *trace-output*))))
+(defvar *debug-lock* (bt:make-lock))
+
+(defmacro %debug (&rest args)
+  `(when nil
+     (bt:with-lock-held (*debug-lock*)
+       (format *trace-output* ,@args)
+       (force-output *trace-output*))))
 
 #+bordeaux-threads
 (defun spellable-p-parallel (message bowl
-                             &key (strategy #'spellable-p-ascii)
-                                  (parts 2))
+                             &key (strategy #'spellable-p-mixed)
+                                  (parts 3))
   (loop with all-done = nil
         with wait-for-it = (cons (bt:make-condition-variable :name "wait for it")
                                  (bt:make-lock))
@@ -183,21 +181,25 @@ MESSAGE's length must fit in a fixnum."
                            for (done needed)
                              = (multiple-value-list
                                 (funcall strategy msg bowl :report-remainder-p t))
-                           if done
+                           when done
                            do
                               (%debug "~&; ~a for ~a and ~a was successful!~%"
                                       (bt:current-thread) msg bowl)
                               (setq all-done t)
-                              (mapc #'bt:destroy-thread
-                                    (delete (bt:current-thread) all-threads))
+                              (bt:with-lock-held ((cdr wait-for-it))
+                                (mapc #'bt:destroy-thread
+                                      (remove-if-not #'bt:thread-alive-p
+                                                     (remove (bt:current-thread) all-threads))))
+                              (return)
+                           unless needed
+                             do (error "Expected a remainer trying ~a on ~a" msg bowl)
                            else
-                             do
-                                (%debug "~&; ~a for ~a and ~a failed and rest ~a!~%"
+                             do (%debug "~&; ~a for ~a and ~a failed and rest ~a!~%"
                                         (bt:current-thread) msg bowl needed)))
                    :name name))
           into all-threads
         finally
-           (loop while (set-difference all-threads ready)) ;; busy-loop
+           (loop while (set-difference all-threads ready) do (bt:thread-yield))
            (bt:with-lock-held ((cdr wait-for-it))
              (loop for thread in ready
                    do (bt:condition-notify (car wait-for-it))))
@@ -285,7 +287,27 @@ characters from the start of DATASET."
               most-frequent
               table))))))
 
-(defun benchmark (fn *dataset* &optional (repetitions 1))
+(defun report-remainder (message needed-array needed-ht)
+  (let ((s (make-array (length message)
+                       :fill-pointer 0
+                       :element-type 'character))
+        (code 0))
+    (declare (type fixnum code))
+    (when needed-array
+      (loop for n across needed-array
+            do (loop repeat (max n 0)
+                     do (vector-push-extend
+                         (code-char code) s))
+               (incf code)))
+    (when needed-ht
+      (maphash (lambda (char n)
+                 (loop repeat (max n 0)
+                       do (vector-push-extend
+                           char s)))
+               needed-ht))
+    s))
+
+(defun benchmark (fn *dataset* &key (repetitions 5000))
   "Test FN on DATASET."
   (multiple-value-bind (phrases bowl)
       (phrases-and-bowl *dataset*)
@@ -293,11 +315,10 @@ characters from the start of DATASET."
       (flet ((do-it ()
                (setq done
                      (ignore-errors
-                      (loop repeat repetitions
-                            do (loop
-                                 repeat 5000
-                                 for msg in phrases
-                                 do (funcall fn msg bowl)))
+                      (loop
+                        repeat repetitions
+                        for msg in phrases
+                        do (funcall fn msg bowl))
                       t))))
         #+cl-ppcre
         (multiple-value-bind (matched submatches)
@@ -324,14 +345,18 @@ characters from the start of DATASET."
 
 (defun benchmark-all (&key
                         (functions
-                         '(spellable-p-hash
-                           spellable-p-ascii
+                         '(;; spellable-p-hash
+                           ;; spellable-p-ascii
                            spellable-p-mixed
-                           spellable-p-mixed-trained))
+                           ;; spellable-p-mixed-trained
+                           #+bordeaux-threads
+                           spellable-p-parallel
+                           ))
                         (datasets
                          '("big-ascii.txt"
                            "das-kapital-utf-8.txt"
-                           "big-chinese-utf-8.txt")))
+                           "big-chinese-utf-8.txt"))
+                        (repetitions 5000))
   (mapc #'trained-function datasets) ; warm-up cache
   (loop
     for dataset in datasets
@@ -339,7 +364,7 @@ characters from the start of DATASET."
        (loop for function in functions
              do (format t "~&   ~a:  " function)
                 (force-output )
-                (benchmark function dataset))))
+                (benchmark function dataset :repetitions repetitions))))
 
 
 
@@ -363,7 +388,9 @@ characters from the start of DATASET."
           '(spellable-p-hash
             spellable-p-ascii
             spellable-p-mixed
-            spellable-p-mixed-trained)
+            spellable-p-mixed-trained
+            #+bordeaux-threads
+            spellable-p-parallel)
           do
              (test fn "foo" "oof" t)
              (test fn "foo" "oo" nil)
