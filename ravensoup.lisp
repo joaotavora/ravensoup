@@ -93,8 +93,13 @@ MESSAGE's length must fit in a fixnum."
             do (return-from spellable-p-mixed t)
           finally (return nil))))
 
-(defun spellable-p-mixed-trained (message bowl
-                                  &optional (char-code-fn #'char-code))
+(defvar *dataset* nil
+  "If non-nil bound to the current dataset being tested by ")
+
+(defun spellable-p-mixed-trained
+    (message bowl &optional (char-code-fn (if *dataset*
+                                              (trained-function *dataset*)
+                                              #'char-code)))
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
 MESSAGE's length must fit in a fixnum."
   (declare (optimize (speed 3))
@@ -149,53 +154,63 @@ MESSAGE's length must fit in a fixnum."
                        do (write-line line s))))))
     (values phrases bowl)))
 
+(defvar *training-cache* (make-hash-table :test #'equal)
+  "A cache of training functions.")
+
 (defun trained-function (dataset &optional howmany)
   "Make a function like CL:CHAR-CODE, but trained on DATASET.
 The function will produce lower numbers for characters occuring more
 often in DATASET.  If non-nil HOWMANY, use just the that many
 characters from the start of DATASET."
-  (let* ((slurped
-           (with-open-file (f dataset)
-             (let ((seq (make-array (or howmany
-                                        (file-length f))
-                                    :element-type 'character
-                                    :fill-pointer t)))
-               (setf (fill-pointer seq)
-                     (read-sequence seq f))
-               seq)))
-         (histogram (let ((ht (make-hash-table)))
-                      (loop for char across slurped
-                            do (incf (gethash (char-code char) ht 0)))
-                      ht))
-         (histogram-alist
-           (let ((alist nil))
-             (maphash (lambda (k v)
-                        (push (cons k v) alist))
-                      histogram)
-             alist))
-         (most-frequent (subseq (sort histogram-alist #'> :key #'cdr)
-                                0 (min +fast-set-len+
-                                       (hash-table-count histogram))))
-         (table (make-array char-code-limit
-                            :element-type 'fixnum
-                            :initial-element -1)))
-    (loop for (code . nil) in most-frequent
-          for i from 0
-          do (setf (aref table code) i))
-    (values (lambda (char)
-              (let ((opt (aref table (char-code char))))
-                (if (minusp opt)
-                    (+ +fast-set-len+ (char-code char)) ; avoid collision
-                    opt)))
-            histogram
-            histogram-alist
-            most-frequent
-            table)))
+  (or
+   (gethash (cons dataset howmany) *training-cache*)
+   (progn
+     (format *trace-output* "~&Training for ~a~%" dataset)
+     (setf (gethash (cons dataset howmany) *training-cache*)
+           (let* ((slurped
+                    (with-open-file (f dataset)
+                      (let ((seq (make-array (or howmany
+                                                 (file-length f))
+                                             :element-type 'character
+                                             :fill-pointer t)))
+                        (setf (fill-pointer seq)
+                              (read-sequence seq f))
+                        seq)))
+                  (histogram (let ((ht (make-hash-table)))
+                               (loop for char across slurped
+                                     do (incf (gethash (char-code char) ht 0)))
+                               ht))
+                  (histogram-alist
+                    (let ((alist nil))
+                      (maphash (lambda (k v)
+                                 (push (cons k v) alist))
+                               histogram)
+                      alist))
+                  (most-frequent (subseq (sort histogram-alist #'> :key #'cdr)
+                                         0 (min +fast-set-len+
+                                                (hash-table-count histogram))))
+                  (table (make-array char-code-limit
+                                     :element-type 'fixnum
+                                     :initial-element -1)))
+             (loop for (code . nil) in most-frequent
+                   for i from 0
+                   do (setf (aref table code) i))
+             ;; Now return the lambda
+             (values
+              (lambda (char)
+                (let ((opt (aref table (char-code char))))
+                  (if (minusp opt)
+                      (+ +fast-set-len+ (char-code char)) ; avoid collision
+                      opt)))
+              histogram
+              histogram-alist
+              most-frequent
+              table))))))
 
-(defun benchmark (fn dataset &optional (repetitions 1))
+(defun benchmark (fn *dataset* &optional (repetitions 1))
   "Test FN on DATASET."
   (multiple-value-bind (phrases bowl)
-      (phrases-and-bowl dataset)
+      (phrases-and-bowl *dataset*)
     (flet ((do-it ()
              (loop repeat repetitions
                    do (loop
@@ -228,22 +243,15 @@ characters from the start of DATASET."
                         (datasets
                          '("big-ascii.txt"
                            "das-kapital-utf-8.txt"
-                           "big-chinese-utf-8.txt"
-                           )))
+                           "big-chinese-utf-8.txt")))
+  (mapc #'trained-function datasets) ; warm-up cache
   (loop
     for dataset in datasets
     do (format *trace-output* "~&~a~%" dataset)
        (loop for function in functions
              do (format t "~&   ~a:  " function)
                 (force-output )
-                (if (eq function 'spellable-p-mixed-trained)
-                    (let ((trained (trained-function dataset)))
-                      (force-output )
-                      (ignore-errors
-                       (benchmark (lambda (msg bowl)
-                                    (spellable-p-mixed-trained msg bowl trained))
-                                  dataset)))
-                    (ignore-errors (benchmark function dataset))))))
+                (ignore-errors (benchmark function dataset)))))
 
 
 
