@@ -211,27 +211,37 @@ characters from the start of DATASET."
   "Test FN on DATASET."
   (multiple-value-bind (phrases bowl)
       (phrases-and-bowl *dataset*)
-    (flet ((do-it ()
-             (loop repeat repetitions
-                   do (loop
-                        repeat 5000
-                        for msg in phrases
-                        do (funcall fn msg bowl)))))
-      #+cl-ppcre
-      (multiple-value-bind (match submatches)
-          (ppcre:scan-to-strings
-           (ppcre:create-scanner
-            #+sbcl "([-0-9\.]+) user"
-            #+ccl "([-0-9\.]+) seconds.*user mode"
-            #+cmucl "([-0-9\.e]+) seconds of user run time"
-            :multi-line-mode t)
-           (with-output-to-string (*trace-output*)
-             (time (do-it))))
-        (when match
-          (princ (elt submatches 0) *trace-output*)
-          (princ "s")))
-      #-cl-ppcre
-      (time (do-it)))
+    (let (done)
+      (flet ((do-it ()
+               (setq done
+                     (ignore-errors
+                      (loop repeat repetitions
+                            do (loop
+                                 repeat 5000
+                                 for msg in phrases
+                                 do (funcall fn msg bowl)))
+                      t))))
+        #+cl-ppcre
+        (multiple-value-bind (matched submatches)
+            (ppcre:scan-to-strings
+             (ppcre:create-scanner
+              #+sbcl "([-0-9\.]+) user"
+              #+ccl "([-0-9\.]+) seconds.*user mode"
+              #+cmucl "([-0-9\.e]+) seconds of user run time"
+              #+allegro "total\\) +([-0-9\.e]+) sec user"
+              :multi-line-mode t)
+             (with-output-to-string (*trace-output*)
+               (time (setq done (ignore-errors (do-it))))))
+          (cond
+            ((not done)
+             (princ "ERROR" *trace-output*))
+            (matched
+             (princ (elt submatches 0) *trace-output*)
+             (princ "s" *trace-output*))
+            (t
+             (princ "OK" *trace-output*))))
+        #-cl-ppcre
+        (time (setq done (do-it)))))
     t))
 
 (defun benchmark-all (&key
@@ -251,7 +261,7 @@ characters from the start of DATASET."
        (loop for function in functions
              do (format t "~&   ~a:  " function)
                 (force-output )
-                (ignore-errors (benchmark function dataset)))))
+                (benchmark function dataset))))
 
 
 
