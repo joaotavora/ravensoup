@@ -149,8 +149,8 @@ MESSAGE's length must fit in a fixnum."
 
 #+bordeaux-threads
 (defun spellable-p-parallel (message bowl
-                             &key (strategy #'spellable-p-mixed)
-                                  (parts 4))
+                             &key (strategy #'spellable-p-ascii)
+                                  (parts (min (length message) 4)))
   (loop with all-done = nil
         with wait-for-it = (cons (bt:make-condition-variable :name "wait for it")
                                  (bt:make-lock))
