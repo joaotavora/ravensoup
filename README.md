@@ -104,6 +104,16 @@ Four different solutions are presented:
   situation, while still performing reasonably well for the other
   datasets.
 
+- `RAVENSOUP:SPELLABLE-P-PARALLEL` - A parallelized version of the
+  same algorithm.  The algorithm is not very easy to parallelize,
+  since there's a lot of contention for the `NEEDED` container.  The
+  best way to go about it seems to be to have threads iterate parts of
+  soup `BOWL` array and keep a separate record for each iteration,
+  until one of the worker threads finds a solution with
+  `SPELLABLE-P-MIXED` As it stands, this solution is only faster for
+  datasets where the solution can only be found relatively late in the
+  `BOWL` array.
+
 ## Results
 
 The function `RAVENSOUP:BENCHMARK-ALL` tests all functions in all
@@ -111,44 +121,46 @@ combinations.  Here is a summary of results for SBCL 1.4.1.
 
 ```
 big-ascii.txt
-  SPELLABLE-P-HASH              26.229s (slowest)
-  SPELLABLE-P-ASCII             2.423s  (fastest)
-  SPELLABLE-P-MIXED             4.977s
-  SPELLABLE-P-MIXED-TRAINED     6.310s
-
+   SPELLABLE-P-HASH:            26.631074s
+   SPELLABLE-P-ASCII:           2.216712s
+   SPELLABLE-P-MIXED:           2.733977s
+   SPELLABLE-P-MIXED-TRAINED:   6.091328s
+   SPELLABLE-P-PARALLEL:        3.892630s
 das-kapital-utf-8.txt
-  SPELLABLE-P-HASH              0.875s  (slowest)
-  SPELLABLE-P-ASCII             FAIL
-  SPELLABLE-P-MIXED             0.124s  (fastest)
-  SPELLABLE-P-MIXED-TRAINED     0.196s
-
+   SPELLABLE-P-HASH:            0.875049s
+   SPELLABLE-P-ASCII:           ERROR
+   SPELLABLE-P-MIXED:           0.085534s
+   SPELLABLE-P-MIXED-TRAINED:   0.168142s
+   SPELLABLE-P-PARALLEL:        0.667253s
 big-chinese-utf-8.txt
-  SPELLABLE-P-HASH              14.571s (slowest)
-  SPELLABLE-P-ASCII             FAIL
-  SPELLABLE-P-MIXED             14.470s
-  SPELLABLE-P-MIXED-TRAINED     5.061s  (fastest)
+   SPELLABLE-P-HASH:            14.542932s
+   SPELLABLE-P-ASCII:           ERROR
+   SPELLABLE-P-MIXED:           14.534880s
+   SPELLABLE-P-MIXED-TRAINED:   4.336483s
+   SPELLABLE-P-PARALLEL:        27.226105s
 ```
 
 CCL 1.11.5 gives the same kind of results:
 
 ```
 big-ascii.txt
-  SPELLABLE-P-HASH              65.644s (slowest)
-  SPELLABLE-P-ASCII             4.070s  (fastest)
-  SPELLABLE-P-MIXED             6.904s
-  SPELLABLE-P-MIXED-TRAINED     11.394s
-
+   SPELLABLE-P-HASH:            61.880070s
+   SPELLABLE-P-ASCII:           5.981482s
+   SPELLABLE-P-MIXED:           6.618700s
+   SPELLABLE-P-MIXED-TRAINED:   11.921486s
+   SPELLABLE-P-PARALLEL:        9.287560s
 das-kapital-utf-8.txt
-  SPELLABLE-P-HASH              1.957s  (slowest)
-  SPELLABLE-P-ASCII             FAIL
-  SPELLABLE-P-MIXED             0.225s  (fastest)
-  SPELLABLE-P-MIXED-TRAINED     0.447s
-
+   SPELLABLE-P-HASH:            2.026962s
+   SPELLABLE-P-ASCII:           ERROR
+   SPELLABLE-P-MIXED:           0.246197s
+   SPELLABLE-P-MIXED-TRAINED:   0.382228s
+   SPELLABLE-P-PARALLEL:        2.204392s
 big-chinese-utf-8.txt
-  SPELLABLE-P-HASH              39.587s (slowest)
-  SPELLABLE-P-ASCII             FAIL
-  SPELLABLE-P-MIXED             37.87s
-  SPELLABLE-P-MIXED-TRAINED     10.431s (fastest)
+   SPELLABLE-P-HASH:            41.055237s
+   SPELLABLE-P-ASCII:           ERROR
+   SPELLABLE-P-MIXED:           39.144627s
+   SPELLABLE-P-MIXED-TRAINED:   11.152960s
+   SPELLABLE-P-PARALLEL:        68.647766s
 ```
 
 ## Conclusion

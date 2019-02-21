@@ -6,8 +6,13 @@
    #:spellable-p-ascii
    #:spellable-p-mixed
    #:spellable-p-mixed-trained
+   #:spellable-p-parallel
    #:benchmark-all))
 (in-package :ravensoup)
+
+#+quicklisp
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (ql:quickload '(:bordeaux-threads :cl-ppcre)))
 
 (deftype utf-string ()
   #+(or cmucl sbcl) '(simple-array character)
@@ -19,7 +24,7 @@
   #+(or sbcl) '(simple-array character)
   #-(or sbcl) 'simple-base-string)
 
-(defun spellable-p-hash (message bowl)
+(defun spellable-p-hash (message bowl &key report-remainder-p)
   "Non-nil if MESSAGE can be spelled using letters in BOWL."
   (declare (optimize (speed 3))
            (type utf-string message)
@@ -34,16 +39,26 @@
             do (decf len)
           when (zerop len)
             do (return-from spellable-p-hash t)
-          finally (return nil))))
+          finally (return
+                    (values nil
+                            (when report-remainder-p
+                              (report-remainder message nil needed)))))))
 
-(defun spellable-p-ascii (message bowl)
+(defun spellable-p-ascii (message bowl &key
+                                         report-remainder-p
+                                         signal-cell
+                                         (skips 1)
+                                         (start 0))
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
 MESSAGE must be coercible to CL:SIMPLE-BASE-STRING (usually means
 ASCII or something equivalent), or this fails horribly.  MESSAGE's
-length must fit in a fixnum."
+length must fit in a fixnum.
+
+REPORT-REMAINDER-P, SIGNAL-CELL, SKIPS, and START are used when the
+function is driven by SPELLABLE-P-PARALLEL."
   (declare (optimize (speed 3))
-           (type ascii-string message)
-           (type ascii-string bowl))
+           (type fixnum start skips)
+           (type ascii-string message bowl))
   (let ((needed (make-array 256 :element-type 'fixnum))
         (len (length message)))
     (declare (type fixnum len)
@@ -51,24 +66,38 @@ length must fit in a fixnum."
              (dynamic-extent needed))
     (loop for letter across message
           do (incf (aref needed (char-code letter))))
-    (loop for letter across bowl
+    (loop with bowl-len = (length bowl)
+          for i from start by skips
+          while (< i bowl-len)
+          for letter = (aref bowl i)
           unless (minusp (decf (aref needed (char-code letter))))
             do (decf len)
+          when (car signal-cell)
+            do (return-from spellable-p-ascii 'stop)
           when (zerop len)
             do (return-from spellable-p-ascii t)
-          finally (return nil))))
+          finally (return
+                    (values nil
+                            (when report-remainder-p
+                              (report-remainder message needed nil)))))))
 
 (defconstant +fast-set-len+ 1024
   "Size of the stack-allocated array for SPELLABLE-P-MIXED and
 SPELLABLE-P-MIXED-TRAINED.  Can't be too high or SBCL won't be able to
 do that optimization.")
 
-(defun spellable-p-mixed (message bowl)
+(defun spellable-p-mixed (message bowl &key report-remainder-p
+                                         signal-cell
+                                         (skips 1)
+                                         (start 0))
   "Non-nil if MESSAGE can be spelled using letters in BOWL.
-MESSAGE's length must fit in a fixnum."
+MESSAGE's length must fit in a fixnum.
+
+REPORT-REMAINDER-P, SIGNAL-CELL, SKIPS, and START are used when the
+function is driven by SPELLABLE-P-PARALLEL."
   (declare (optimize (speed 3))
-           (type utf-string message)
-           (type utf-string bowl))
+           (type fixnum start skips)
+           (type utf-string message bowl))
   (let ((fast-needed (make-array +fast-set-len+ :element-type 'fixnum))
         (more-needed (make-hash-table :test #'eql))
         (len (length message)))
@@ -81,7 +110,10 @@ MESSAGE's length must fit in a fixnum."
             do (incf (aref fast-needed code))
           else
             do (incf (the fixnum (gethash letter more-needed 0))))
-    (loop for letter across bowl
+    (loop with bowl-len = (length bowl)
+          for i from start by skips
+          while (< i bowl-len)
+          for letter = (aref bowl i)
           for code = (char-code letter)
           for decremented
             = (if (< code +fast-set-len+)
@@ -89,9 +121,14 @@ MESSAGE's length must fit in a fixnum."
                   (decf (the fixnum (gethash letter more-needed 0))))
           unless (minusp decremented)
             do (decf len)
+          when (car signal-cell)
+            do (return-from spellable-p-mixed 'stop)
           when (zerop len)
             do (return-from spellable-p-mixed t)
-          finally (return nil))))
+          finally (return
+                    (values nil
+                            (when report-remainder-p
+                              (report-remainder message fast-needed more-needed)))))))
 
 (defvar *dataset* nil
   "If non-nil bound to the current dataset being tested by ")
@@ -129,6 +166,40 @@ MESSAGE's length must fit in a fixnum."
           when (zerop len)
             do (return-from spellable-p-mixed-trained t)
           finally (return nil))))
+
+#+bordeaux-threads
+(defun spellable-p-parallel (message bowl
+                             &key (strategy #'spellable-p-mixed)
+                               (parts (min (length message) 2)))
+  (loop with all-done = (list nil)
+        for i from 0 below parts
+        for name = (format nil "thread-~d" i)
+        collect (bt:make-thread
+                 (lambda ()
+                   (loop repeat parts
+                         for j from i
+                         for msg = message then needed
+                         for (done needed)
+                           = (multiple-value-list
+                              (funcall strategy msg bowl
+                                       :report-remainder-p t
+                                       :signal-cell all-done
+                                       :skips parts
+                                       :start (mod j parts)))
+                         do (cond (done
+                                   (setf (car all-done)  t) (return))
+                                  ((car all-done) (return))
+                                  ((not needed)
+                                   (error "~a failed, so expected a remainder"
+                                          (bt:current-thread)))
+                                  (t
+                                   ;; we failed, try the next iteration
+                                   ))))
+                 :name name)
+          into all-threads
+        finally
+           (mapc #'bt:join-thread all-threads)
+           (return (car all-done))))
 
 
 ;;; Helpers
@@ -207,6 +278,26 @@ characters from the start of DATASET."
               most-frequent
               table))))))
 
+(defun report-remainder (message needed-array needed-ht)
+  (let ((s (make-array (length message)
+                       :fill-pointer 0
+                       :element-type 'character))
+        (code 0))
+    (declare (type fixnum code))
+    (when needed-array
+      (loop for n across needed-array
+            do (loop repeat (max n 0)
+                     do (vector-push-extend
+                         (code-char code) s))
+               (incf code)))
+    (when needed-ht
+      (maphash (lambda (char n)
+                 (loop repeat (max n 0)
+                       do (vector-push-extend
+                           char s)))
+               needed-ht))
+    (make-array (length s) :initial-contents s :element-type 'character)))
+
 (defun benchmark (fn *dataset* &optional (repetitions 1))
   "Test FN on DATASET."
   (multiple-value-bind (phrases bowl)
@@ -249,7 +340,10 @@ characters from the start of DATASET."
                          '(spellable-p-hash
                            spellable-p-ascii
                            spellable-p-mixed
-                           spellable-p-mixed-trained))
+                           spellable-p-mixed-trained
+                           #+bordeaux-threads
+                           spellable-p-parallel
+                           ))
                         (datasets
                          '("big-ascii.txt"
                            "das-kapital-utf-8.txt"
@@ -274,6 +368,20 @@ characters from the start of DATASET."
           do (setf (aref str i) (code-char (random 256))))
     str))
 
+(defun make-random-string (count)
+  (let ((str (make-string count)))
+    (loop for i from 0 below (length str)
+          do (setf (aref str i) (code-char (random char-code-limit))))
+    str))
+
+(defun tricky-message-and-bowl (n)
+  (values "foobar"
+          (concatenate 'string "fooba"
+                       (make-array n
+                                   :initial-element #\x
+                                   :element-type 'character)
+                       "r")))
+
 (defun basic-test ()
   (flet ((test (fn msg bowl expected)
            (assert (eq expected
@@ -285,7 +393,9 @@ characters from the start of DATASET."
           '(spellable-p-hash
             spellable-p-ascii
             spellable-p-mixed
-            spellable-p-mixed-trained)
+            spellable-p-mixed-trained
+            #+bordeaux-threads
+            spellable-p-parallel)
           do
              (test fn "foo" "oof" t)
              (test fn "foo" "oo" nil)
